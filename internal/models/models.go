@@ -3,12 +3,12 @@ package models
 import "time"
 
 type Booking struct {
-	Date      string // Формат: "02.01.2006"
-	Time      string
-	CarModel  string
-	CarNumber string
-	UserID    int64
-	Created   time.Time
+	Date      string    `json:"date"` // Формат: "02.01.2006"
+	Time      string    `json:"time"` // Формат: "15:04"
+	CarModel  string    `json:"car_model"`
+	CarNumber string    `json:"car_number"`
+	UserID    int64     `json:"user_id"`
+	Created   time.Time `json:"created_at"`
 }
 
 type UserState struct {
