@@ -3,7 +3,7 @@ package services
 import (
 	"carwash-bot/internal/models"
 	"fmt"
-	"sort"
+	"github.com/google/uuid"
 	"sync"
 	"time"
 )
@@ -13,6 +13,7 @@ type ScheduleService struct {
 	bookingsLock sync.Mutex
 	startTime    int // Начальное время (часы)
 	endTime      int // Конечное время (часы)
+	adminID      int64
 }
 
 func NewScheduleService(start, end int) *ScheduleService {
@@ -24,6 +25,7 @@ func NewScheduleService(start, end int) *ScheduleService {
 
 // BookDateTime - добавляет новую запись с проверкой доступности
 func (s *ScheduleService) BookDateTime(date, timeStr, carModel, carNumber string, userID int64) bool {
+
 	s.bookingsLock.Lock()
 	defer s.bookingsLock.Unlock()
 
@@ -36,6 +38,7 @@ func (s *ScheduleService) BookDateTime(date, timeStr, carModel, carNumber string
 
 	// Добавляем новую запись
 	s.bookings = append(s.bookings, models.Booking{
+		ID:        uuid.New().String(),
 		Date:      date,
 		Time:      timeStr,
 		CarModel:  carModel,
@@ -100,19 +103,23 @@ func (s *ScheduleService) GetAvailableTimeSlots(date string) []string {
 	return slots
 }
 
-// CancelBooking - отменяет запись по ID пользователя и времени
-func (s *ScheduleService) CancelBooking(userID int64, date, timeStr string) bool {
+// GetUserBookings - возвращает записи пользователя
+func (s *ScheduleService) CancelBooking(bookingID string, userID int64) (bool, *models.Booking) {
 	s.bookingsLock.Lock()
 	defer s.bookingsLock.Unlock()
 
 	for i, booking := range s.bookings {
-		if booking.UserID == userID && booking.Date == date && booking.Time == timeStr {
-			// Удаляем запись из slice
-			s.bookings = append(s.bookings[:i], s.bookings[i+1:]...)
-			return true
+		if booking.ID == bookingID {
+			// Проверяем, что отменяет владелец или админ
+			if booking.UserID == userID || userID == s.adminID {
+				deletedBooking := s.bookings[i]
+				s.bookings = append(s.bookings[:i], s.bookings[i+1:]...)
+				return true, &deletedBooking
+			}
+			return false, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // GetUserBookings - возвращает записи пользователя
@@ -120,24 +127,13 @@ func (s *ScheduleService) GetUserBookings(userID int64) []models.Booking {
 	s.bookingsLock.Lock()
 	defer s.bookingsLock.Unlock()
 
-	var result []models.Booking
+	var userBookings []models.Booking
 	for _, booking := range s.bookings {
 		if booking.UserID == userID {
-			result = append(result, booking)
+			userBookings = append(userBookings, booking)
 		}
 	}
-
-	// Сортируем по дате и времени
-	sort.Slice(result, func(i, j int) bool {
-		dateI, _ := time.Parse("02.01.2006", result[i].Date)
-		dateJ, _ := time.Parse("02.01.2006", result[j].Date)
-		if dateI.Equal(dateJ) {
-			return result[i].Time < result[j].Time
-		}
-		return dateI.Before(dateJ)
-	})
-
-	return result
+	return userBookings
 }
 func (s *ScheduleService) GetBooking(userID int64, date, time string) *models.Booking {
 	s.bookingsLock.Lock()

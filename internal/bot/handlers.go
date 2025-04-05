@@ -37,6 +37,9 @@ func (b *CarWashBot) handleMessage(msg *tgbotapi.Message) {
 	case text == "❌ Мои записи" || text == "/mybookings":
 		b.showUserBookings(msg.Chat.ID, msg.From.ID)
 
+	case text == "❌ Отменить запись" || text == "/cancel":
+		b.handleCancelCommand(chatID, userID)
+
 	default:
 		b.sendMessage(chatID, "Я не понимаю эту команду. Используйте кнопки меню.")
 	}
@@ -65,14 +68,17 @@ func (b *CarWashBot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	case data == "main_menu":
 		b.sendWelcomeMessage(chatID)
 
+	case strings.HasPrefix(data, "cancel_"):
+		bookingID := strings.TrimPrefix(data, "cancel_")
+		b.handleBookingCancellation(chatID, userID, bookingID)
+
 	default:
 		log.Printf("Неизвестный callback: %s", data)
 	}
 }
-
 func (b *CarWashBot) sendWelcomeMessage(chatID int64) {
 	msgText := `🚗 *Добро пожаловать в бота автомойки!* 🧼
-
+    
 Выберите действие:`
 
 	msg := tgbotapi.NewMessage(chatID, msgText)
@@ -83,6 +89,7 @@ func (b *CarWashBot) sendWelcomeMessage(chatID int64) {
 			tgbotapi.NewKeyboardButton("🕒 Расписание"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("❌ Отменить запись"),
 			tgbotapi.NewKeyboardButton("ℹ️ Помощь"),
 		),
 	)
@@ -372,4 +379,40 @@ func (b *CarWashBot) showUserBookings(chatID, userID int64) {
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	b.sendMessageWithSave(chatID, msg)
+}
+func (b *CarWashBot) handleCancelCommand(chatID, userID int64) {
+	userBookings := b.schedule.GetUserBookings(userID)
+	if len(userBookings) == 0 {
+		b.sendMessage(chatID, "У вас нет активных записей.")
+		return
+	}
+
+	var buttons [][]tgbotapi.InlineKeyboardButton
+	for _, booking := range userBookings {
+		btnText := fmt.Sprintf("%s %s - %s %s",
+			booking.Date, booking.Time, booking.CarModel, booking.CarNumber)
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(btnText, "cancel_"+booking.ID),
+		))
+	}
+
+	buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData("🔙 Назад", "main_menu"),
+	))
+
+	msg := tgbotapi.NewMessage(chatID, "Выберите запись для отмены:")
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
+	b.sendMessageWithSave(chatID, msg)
+}
+
+func (b *CarWashBot) handleBookingCancellation(chatID, userID int64, bookingID string) {
+	success, booking := b.schedule.CancelBooking(bookingID, userID)
+	if !success {
+		b.sendMessage(chatID, "Не удалось отменить запись.")
+		return
+	}
+
+	msg := fmt.Sprintf("✅ Запись отменена:\n%s %s - %s %s",
+		booking.Date, booking.Time, booking.CarModel, booking.CarNumber)
+	b.sendMessage(chatID, msg)
 }

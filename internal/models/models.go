@@ -3,6 +3,7 @@ package models
 import "time"
 
 type Booking struct {
+	ID        string    `json:"id"`   // Уникальный идентификатор записи
 	Date      string    `json:"date"` // Формат: "02.01.2006"
 	Time      string    `json:"time"` // Формат: "15:04"
 	CarModel  string    `json:"car_model"`
