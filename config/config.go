@@ -1,26 +1,45 @@
 package config
 
 import (
+	"log"
 	"os"
 	"strconv"
+
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
 	BotToken  string
 	AdminID   int64
-	StartTime int // 8 (8:00)
-	EndTime   int // 20 (20:00)
+	StartTime int
+	EndTime   int
+	Days      map[string]string // Новое поле для дней недели
 }
 
 func Load() *Config {
-	return &Config{
-		BotToken:  getEnv("7611375727:AAHKbtGJDOlhP5YJKJg8mNTAQRjNumYx1c8", "7611375727:AAHKbtGJDOlhP5YJKJg8mNTAQRjNumYx1c8"),
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
+
+	cfg := &Config{
+		BotToken:  getEnv("TELEGRAM_BOT_TOKEN", ""),
 		AdminID:   getEnvAsInt64("ADMIN_CHAT_ID", 0),
 		StartTime: 8,
 		EndTime:   20,
+		Days: map[string]string{ // Русские названия дней
+			"Monday":    "Понедельник",
+			"Tuesday":   "Вторник",
+			"Wednesday": "Среда",
+			"Thursday":  "Четверг",
+			"Friday":    "Пятница",
+			"Saturday":  "Суббота",
+			"Sunday":    "Воскресенье",
+		},
 	}
-}
 
+	return cfg
+}
 func getEnv(key, defaultValue string) string {
 	if value, exists := os.LookupEnv(key); exists {
 		return value

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"carwash-bot/internal/models"
+	"context"
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"log"
@@ -15,7 +16,18 @@ func (b *CarWashBot) handleMessage(msg *tgbotapi.Message) {
 	userID := msg.From.ID
 	text := msg.Text
 
-	// Проверяем состояние пользователя (ожидание данных авто)
+	// Сначала сохраняем/обновляем пользователя
+	user := &models.User{
+		TelegramID: userID,
+		Username:   msg.From.UserName,
+		FirstName:  msg.From.FirstName,
+		LastName:   msg.From.LastName,
+	}
+	if err := b.storage.CreateOrUpdateUser(context.Background(), user); err != nil {
+		log.Printf("Ошибка сохранения пользователя: %v", err)
+	}
+
+	// Проверяем состояние пользователя
 	if state, exists := b.userStates[userID]; exists {
 		if state.AwaitingCarInfo {
 			b.handleCarInfoInput(chatID, userID, text)
@@ -35,7 +47,10 @@ func (b *CarWashBot) handleMessage(msg *tgbotapi.Message) {
 		b.showSchedule(chatID)
 
 	case text == "❌ Мои записи" || text == "/mybookings":
-		b.showUserBookings(msg.Chat.ID, msg.From.ID)
+		b.showUserBookings(chatID, userID)
+
+	case text == "🧹 Очистить чат" || text == "/clear":
+		b.clearChat(chatID)
 
 	case text == "❌ Отменить запись" || text == "/cancel":
 		b.handleCancelCommand(chatID, userID)
@@ -50,7 +65,6 @@ func (b *CarWashBot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	userID := query.From.ID
 	data := query.Data
 
-	// Отвечаем на callback (убираем "часы ожидания")
 	callback := tgbotapi.NewCallback(query.ID, "")
 	if _, err := b.botAPI.Request(callback); err != nil {
 		log.Printf("Ошибка ответа на callback: %v", err)
@@ -77,11 +91,9 @@ func (b *CarWashBot) handleCallbackQuery(query *tgbotapi.CallbackQuery) {
 	}
 }
 func (b *CarWashBot) sendWelcomeMessage(chatID int64) {
-	msgText := `🚗 *Добро пожаловать в бота автомойки!* 🧼
+	msg := tgbotapi.NewMessage(chatID, `🚗 *Добро пожаловать в бота автомойки!* 🧼
     
-Выберите действие:`
-
-	msg := tgbotapi.NewMessage(chatID, msgText)
+Выберите действие:`)
 	msg.ParseMode = "Markdown"
 	msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
 		tgbotapi.NewKeyboardButtonRow(
@@ -90,7 +102,7 @@ func (b *CarWashBot) sendWelcomeMessage(chatID int64) {
 		),
 		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("❌ Отменить запись"),
-			tgbotapi.NewKeyboardButton("ℹ️ Помощь"),
+			tgbotapi.NewKeyboardButton("🧹 Очистить чат"),
 		),
 	)
 	b.sendMessageWithSave(chatID, msg)
@@ -100,13 +112,19 @@ func (b *CarWashBot) handleTimeSelection(chatID, userID int64, timeStr string) {
 	state := b.userStates[userID]
 
 	// Проверяем доступность времени
-	if !b.schedule.IsTimeAvailable(state.SelectedDate, timeStr) {
+	available, err := b.storage.IsTimeAvailable(context.Background(), state.SelectedDate, timeStr)
+	if err != nil {
+		log.Printf("Ошибка проверки времени: %v", err)
+		b.sendMessage(chatID, "⚠️ Ошибка системы. Попробуйте позже.")
+		return
+	}
+
+	if !available {
 		b.sendMessage(chatID, "❌ Это время уже занято! Выберите другое время.")
 		b.showTimeSlots(chatID, state.SelectedDate)
 		return
 	}
 
-	// Сохраняем время и запрашиваем данные авто
 	b.userStates[userID] = models.UserState{
 		AwaitingCarInfo: true,
 		SelectedDate:    state.SelectedDate,
@@ -118,68 +136,62 @@ func (b *CarWashBot) handleTimeSelection(chatID, userID int64, timeStr string) {
 }
 
 func (b *CarWashBot) handleCarInfoInput(chatID, userID int64, text string) {
-	// Удаляем предыдущее сообщение
 	b.deleteLastMessage(chatID)
 
-	// Упрощенная проверка - просто разделяем по первому пробелу
+	// Проверка на команды
+	if b.isCommand(text) {
+		msg := tgbotapi.NewMessage(chatID, "❌ Введите марку и номер машины, а не команду\nПример: Toyota CAM777")
+		b.sendMessageWithSave(chatID, msg)
+		return
+	}
+
 	parts := strings.SplitN(text, " ", 2)
-	if len(parts) < 2 {
-		msg := tgbotapi.NewMessage(chatID, "Нужно ввести и марку, и номер!\nПример: Газель 123")
+	if len(parts) < 2 || len(parts[1]) < 3 {
+		msg := tgbotapi.NewMessage(chatID, "❌ Неверный формат!\nВведите: Марка Номер\nПример: Kia ABC123")
 		b.sendMessageWithSave(chatID, msg)
 		return
 	}
 
-	carModel := parts[0]
-	carNumber := parts[1]
 	state := b.userStates[userID]
-
-	// Записываем в расписание
-	if !b.schedule.BookDateTime(state.SelectedDate, state.SelectedTime, carModel, carNumber, userID) {
-		msg := tgbotapi.NewMessage(chatID, "⚠️ Это время уже занято! Выберите другое время.")
-		msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
-			tgbotapi.NewKeyboardButtonRow(
-				tgbotapi.NewKeyboardButton("📝 Записаться"),
-				tgbotapi.NewKeyboardButton("🏠 Главное меню"),
-			),
-		)
-		b.sendMessageWithSave(chatID, msg)
+	user, err := b.storage.GetUserByTelegramID(context.Background(), userID)
+	if err != nil {
+		log.Printf("Ошибка получения пользователя: %v", err)
+		b.sendMessage(chatID, "⚠️ Ошибка системы. Попробуйте позже.")
 		return
 	}
 
-	// Удаляем состояние пользователя
+	booking := &models.Booking{
+		UserID:    user.ID,
+		Date:      state.SelectedDate,
+		Time:      state.SelectedTime,
+		CarModel:  parts[0],
+		CarNumber: parts[1],
+	}
+
+	if err := b.storage.CreateBooking(context.Background(), booking); err != nil {
+		log.Printf("Ошибка создания записи: %v", err)
+		b.sendMessage(chatID, "⚠️ Это время уже занято! Выберите другое.")
+		b.showTimeSlots(chatID, state.SelectedDate)
+		return
+	}
+
 	delete(b.userStates, userID)
-
-	// Отправляем подтверждение
-	confirmMsg := fmt.Sprintf(`✅ Вы записаны!
-📅 %s в %s
-🚗 %s %s`,
-		state.SelectedDate, state.SelectedTime, carModel, carNumber)
-
-	msg := tgbotapi.NewMessage(chatID, confirmMsg)
-	msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
-		tgbotapi.NewKeyboardButtonRow(
-			tgbotapi.NewKeyboardButton("🏠 Главное меню"),
-		),
-	)
-	b.sendMessageWithSave(chatID, msg)
-
-	// Уведомляем админа
-	b.notifyAdminAboutNewBooking(state.SelectedTime, carModel, carNumber)
+	b.sendBookingConfirmation(chatID, booking)
+	b.notifyAdmin(booking)
 }
 
 func (b *CarWashBot) showSchedule(chatID int64) {
-	// Получаем записи через метод сервиса
-	bookingsByDate := b.schedule.GetBookingsGroupedByDate()
-
-	// Сортируем даты в хронологическом порядке
-	var dates []time.Time
-	for dateStr := range bookingsByDate {
-		date, _ := time.Parse("02.01.2006", dateStr)
-		dates = append(dates, date)
+	bookings, err := b.storage.GetAllBookings(context.Background())
+	if err != nil {
+		log.Printf("Ошибка получения расписания: %v", err)
+		b.sendMessage(chatID, "⚠️ Ошибка загрузки расписания.")
+		return
 	}
-	sort.Slice(dates, func(i, j int) bool {
-		return dates[i].Before(dates[j])
-	})
+
+	bookingsByDate := make(map[string][]*models.Booking)
+	for _, booking := range bookings {
+		bookingsByDate[booking.Date] = append(bookingsByDate[booking.Date], booking)
+	}
 
 	var sb strings.Builder
 	sb.WriteString("📅 Полное расписание:\n\n")
@@ -188,26 +200,32 @@ func (b *CarWashBot) showSchedule(chatID int64) {
 	today := now.Format("02.01.2006")
 	tomorrow := now.AddDate(0, 0, 1).Format("02.01.2006")
 
+	// Сортируем даты
+	var dates []string
+	for date := range bookingsByDate {
+		dates = append(dates, date)
+	}
+	sort.Strings(dates)
+
 	for _, date := range dates {
-		dateStr := date.Format("02.01.2006")
-
-		// Форматируем заголовок
-		switch dateStr {
-		case today:
-			sb.WriteString("=== Сегодня ===\n")
-		case tomorrow:
-			sb.WriteString("=== Завтра ===\n")
-		default:
-			sb.WriteString(fmt.Sprintf("=== %s ===\n", date.Format("Monday, 02.01")))
-		}
-
-		// Сортируем записи по времени
-		bookings := bookingsByDate[dateStr]
+		bookings := bookingsByDate[date]
 		sort.Slice(bookings, func(i, j int) bool {
 			return bookings[i].Time < bookings[j].Time
 		})
 
-		// Добавляем записи
+		// Форматируем заголовок
+		parsedDate, _ := time.Parse("02.01.2006", date)
+		dayName := b.getDayName(parsedDate.Weekday())
+
+		switch date {
+		case today:
+			sb.WriteString("=== Сегодня (" + dayName + ") ===\n")
+		case tomorrow:
+			sb.WriteString("=== Завтра (" + dayName + ") ===\n")
+		default:
+			sb.WriteString(fmt.Sprintf("=== %s, %s ===\n", dayName, date))
+		}
+
 		for _, booking := range bookings {
 			sb.WriteString(fmt.Sprintf("🕒 %s - %s %s\n",
 				booking.Time,
@@ -246,7 +264,6 @@ func (b *CarWashBot) sendMessage(chatID int64, text string) {
 		log.Printf("Ошибка отправки сообщения: %v", err)
 	}
 }
-
 func (b *CarWashBot) sendMessageWithSave(chatID int64, msg tgbotapi.MessageConfig) {
 	sentMsg, err := b.botAPI.Send(msg)
 	if err != nil {
@@ -258,7 +275,6 @@ func (b *CarWashBot) sendMessageWithSave(chatID int64, msg tgbotapi.MessageConfi
 	b.lastMessageID[chatID] = sentMsg.MessageID
 	b.msgIDLock.Unlock()
 }
-
 func (b *CarWashBot) deleteLastMessage(chatID int64) {
 	b.msgIDLock.Lock()
 	msgID := b.lastMessageID[chatID]
@@ -271,10 +287,18 @@ func (b *CarWashBot) deleteLastMessage(chatID int64) {
 }
 
 func (b *CarWashBot) showTimeSlots(chatID int64, dateStr string) {
+	date, _ := time.Parse("02.01.2006", dateStr)
+	dayName := b.getDayName(date.Weekday())
+
 	var rows [][]tgbotapi.InlineKeyboardButton
 	for hour := 8; hour <= 20; hour++ {
 		timeStr := fmt.Sprintf("%02d:00", hour)
-		available := b.schedule.IsTimeAvailable(dateStr, timeStr)
+
+		available, err := b.IsTimeAvailable(dateStr, timeStr)
+		if err != nil {
+			log.Printf("Ошибка проверки времени: %v", err)
+			continue
+		}
 
 		btnText := fmt.Sprintf("🕒 %s", timeStr)
 		if !available {
@@ -292,12 +316,13 @@ func (b *CarWashBot) showTimeSlots(chatID int64, dateStr string) {
 		tgbotapi.NewInlineKeyboardButtonData("🔙 В главное меню", "main_menu"),
 	))
 
-	date, _ := time.Parse("02.01.2006", dateStr)
-	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Выберите время на %s:", date.Format("Monday, 02.01")))
+	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Выберите время на %s, %s:", dayName, dateStr))
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
 	b.sendMessageWithSave(chatID, msg)
 }
-
+func (b *CarWashBot) IsTimeAvailable(date, time string) (bool, error) {
+	return b.storage.IsTimeAvailable(context.Background(), date, time)
+}
 func (b *CarWashBot) showDaySelection(chatID int64) {
 	now := time.Now()
 	var buttons [][]tgbotapi.InlineKeyboardButton
@@ -305,12 +330,13 @@ func (b *CarWashBot) showDaySelection(chatID int64) {
 	for i := 0; i < 7; i++ {
 		date := now.AddDate(0, 0, i)
 		dateStr := date.Format("02.01.2006")
+		dayName := b.getDayName(date.Weekday())
 
-		btnText := fmt.Sprintf("📅 %s", date.Format("Mon 02.01"))
+		btnText := fmt.Sprintf("📅 %s, %s", dayName, date.Format("02.01"))
 		if i == 0 {
-			btnText = "🔵 Сегодня " + date.Format("02.01")
+			btnText = "🔵 Сегодня, " + date.Format("02.01")
 		} else if i == 1 {
-			btnText = "🔵 Завтра " + date.Format("02.01")
+			btnText = "🔵 Завтра, " + date.Format("02.01")
 		}
 
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(
@@ -326,7 +352,6 @@ func (b *CarWashBot) showDaySelection(chatID int64) {
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	b.sendMessageWithSave(chatID, msg)
 }
-
 func (b *CarWashBot) handleDaySelection(chatID, userID int64, dateStr string) {
 	selectedDate, err := time.Parse("02.01.2006", dateStr)
 	if err != nil || selectedDate.Before(time.Now().Truncate(24*time.Hour)) {
@@ -342,8 +367,21 @@ func (b *CarWashBot) handleDaySelection(chatID, userID int64, dateStr string) {
 
 	b.showTimeSlots(chatID, dateStr)
 }
+
 func (b *CarWashBot) showUserBookings(chatID, userID int64) {
-	bookings := b.schedule.GetUserBookings(userID)
+	user, err := b.storage.GetUserByTelegramID(context.Background(), userID)
+	if err != nil || user == nil {
+		log.Printf("Ошибка получения пользователя: %v", err)
+		b.sendMessage(chatID, "⚠️ Ошибка загрузки записей.")
+		return
+	}
+
+	bookings, err := b.storage.GetUserBookings(context.Background(), user.ID)
+	if err != nil {
+		log.Printf("Ошибка получения записей: %v", err)
+		b.sendMessage(chatID, "⚠️ Ошибка загрузки записей.")
+		return
+	}
 
 	if len(bookings) == 0 {
 		b.sendMessage(chatID, "У вас нет активных записей.")
@@ -351,23 +389,19 @@ func (b *CarWashBot) showUserBookings(chatID, userID int64) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📋 *Ваши записи:*\n\n")
+	sb.WriteString("📋 Ваши записи:\n\n")
 
 	var buttons [][]tgbotapi.InlineKeyboardButton
-
 	for _, booking := range bookings {
 		sb.WriteString(fmt.Sprintf(
 			"📅 %s\n🕒 %s\n🚗 %s %s\n\n",
 			booking.Date,
 			booking.Time,
 			booking.CarModel,
-			booking.CarNumber,
-		))
+			booking.CarNumber))
 
-		// Добавляем кнопку отмены для каждой записи
-		btnData := fmt.Sprintf("cancel_%s_%s", booking.Date, booking.Time)
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("❌ Отменить эту запись", btnData),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Отменить", "cancel_"+booking.ID),
 		))
 	}
 
@@ -380,15 +414,27 @@ func (b *CarWashBot) showUserBookings(chatID, userID int64) {
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	b.sendMessageWithSave(chatID, msg)
 }
+
 func (b *CarWashBot) handleCancelCommand(chatID, userID int64) {
-	userBookings := b.schedule.GetUserBookings(userID)
-	if len(userBookings) == 0 {
+	user, err := b.storage.GetUserByTelegramID(context.Background(), userID)
+	if err != nil || user == nil {
+		b.sendMessage(chatID, "⚠️ Ошибка загрузки записей")
+		return
+	}
+
+	bookings, err := b.storage.GetUserBookings(context.Background(), user.ID)
+	if err != nil {
+		b.sendMessage(chatID, "⚠️ Ошибка загрузки записей")
+		return
+	}
+
+	if len(bookings) == 0 {
 		b.sendMessage(chatID, "У вас нет активных записей.")
 		return
 	}
 
 	var buttons [][]tgbotapi.InlineKeyboardButton
-	for _, booking := range userBookings {
+	for _, booking := range bookings {
 		btnText := fmt.Sprintf("%s %s - %s %s",
 			booking.Date, booking.Time, booking.CarModel, booking.CarNumber)
 		buttons = append(buttons, tgbotapi.NewInlineKeyboardRow(
@@ -404,15 +450,100 @@ func (b *CarWashBot) handleCancelCommand(chatID, userID int64) {
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons...)
 	b.sendMessageWithSave(chatID, msg)
 }
-
 func (b *CarWashBot) handleBookingCancellation(chatID, userID int64, bookingID string) {
-	success, booking := b.schedule.CancelBooking(bookingID, userID)
-	if !success {
-		b.sendMessage(chatID, "Не удалось отменить запись.")
+	user, err := b.storage.GetUserByTelegramID(context.Background(), userID)
+	if err != nil || user == nil {
+		log.Printf("Ошибка получения пользователя: %v", err)
+		b.sendMessage(chatID, "⚠️ Ошибка системы.")
+		return
+	}
+
+	booking, err := b.storage.CancelBooking(context.Background(), bookingID, user.ID)
+	if err != nil {
+		log.Printf("Ошибка отмены брони: %v", err)
+		b.sendMessage(chatID, "❌ Не удалось отменить запись.")
 		return
 	}
 
 	msg := fmt.Sprintf("✅ Запись отменена:\n%s %s - %s %s",
 		booking.Date, booking.Time, booking.CarModel, booking.CarNumber)
 	b.sendMessage(chatID, msg)
+}
+func (b *CarWashBot) createDayButtons() tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	days := b.cfg.Days // Используем дни из конфига
+
+	// Создаем кнопки для каждого дня
+	for engDay, ruDay := range days {
+		btn := tgbotapi.NewInlineKeyboardButtonData(ruDay, "day_"+engDay)
+		row := []tgbotapi.InlineKeyboardButton{btn}
+		rows = append(rows, row)
+	}
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// Добавляем метод для получения русских названий дней
+func (b *CarWashBot) getDayName(day time.Weekday) string {
+	daysMap := map[time.Weekday]string{
+		time.Monday:    "Понедельник",
+		time.Tuesday:   "Вторник",
+		time.Wednesday: "Среда",
+		time.Thursday:  "Четверг",
+		time.Friday:    "Пятница",
+		time.Saturday:  "Суббота",
+		time.Sunday:    "Воскресенье",
+	}
+	return daysMap[day]
+}
+
+func (b *CarWashBot) isCommand(text string) bool {
+	commands := []string{
+		"📝 Записаться", "🕒 Расписание", "❌ Отменить запись",
+		"🏠 Главное меню", "/start", "/menu", "/book", "/schedule", "/cancel",
+	}
+
+	for _, cmd := range commands {
+		if strings.EqualFold(text, cmd) {
+			return true
+		}
+	}
+	return false
+}
+
+func (b *CarWashBot) sendBookingConfirmation(chatID int64, booking *models.Booking) {
+	msgText := fmt.Sprintf(`✅ Запись подтверждена!
+📅 Дата: %s
+🕒 Время: %s
+🚗 Авто: %s %s`,
+		booking.Date,
+		booking.Time,
+		booking.CarModel,
+		booking.CarNumber)
+
+	msg := tgbotapi.NewMessage(chatID, msgText)
+	msg.ReplyMarkup = tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("🏠 Главное меню"),
+		),
+	)
+	b.sendMessageWithSave(chatID, msg)
+}
+
+func (b *CarWashBot) notifyAdmin(booking *models.Booking) {
+	msgText := fmt.Sprintf(`🆕 Новая запись:
+📅 %s в %s
+🚗 %s %s`,
+		booking.Date,
+		booking.Time,
+		booking.CarModel,
+		booking.CarNumber)
+
+	msg := tgbotapi.NewMessage(b.adminID, msgText)
+	if _, err := b.botAPI.Send(msg); err != nil {
+		log.Printf("Ошибка уведомления админа: %v", err)
+	}
+}
+func (b *CarWashBot) GetAllBookings() ([]*models.Booking, error) {
+	return b.storage.GetAllBookings(context.Background())
 }
