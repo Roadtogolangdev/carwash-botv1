@@ -9,8 +9,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func (s *SQLiteStorage) Init() error {
-	_, err := s.db.Exec(`
+func (s *Storage) Init() error {
+	_, err := s.DB.Exec(`
     CREATE TABLE IF NOT EXISTS users (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         telegram_id INTEGER UNIQUE NOT NULL,
@@ -37,11 +37,11 @@ func (s *SQLiteStorage) Init() error {
 	return err
 }
 
-func (s *SQLiteStorage) CreateBooking(ctx context.Context, booking *models.Booking) error {
+func (s *Storage) CreateBooking(ctx context.Context, booking *models.Booking) error {
 	booking.ID = uuid.New().String()
 	booking.CreatedAt = time.Now()
 
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.DB.ExecContext(ctx, `
 	INSERT INTO bookings (id, user_id, date, time, car_model, car_number)
 	VALUES (?, ?, ?, ?, ?, ?)`,
 		booking.ID,
@@ -54,8 +54,8 @@ func (s *SQLiteStorage) CreateBooking(ctx context.Context, booking *models.Booki
 	return err
 }
 
-func (s *SQLiteStorage) GetUserBookings(ctx context.Context, userID int64) ([]*models.Booking, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *Storage) GetUserBookings(ctx context.Context, userID int64) ([]*models.Booking, error) {
+	rows, err := s.DB.QueryContext(ctx, `
 	SELECT id, date, time, car_model, car_number, created_at
 	FROM bookings WHERE user_id = ? ORDER BY date, time`, userID)
 	if err != nil {
@@ -73,19 +73,19 @@ func (s *SQLiteStorage) GetUserBookings(ctx context.Context, userID int64) ([]*m
 	}
 	return bookings, nil
 }
-func (s *SQLiteStorage) Close() error {
-	return s.db.Close()
+func (s *Storage) Close() error {
+	return s.DB.Close()
 }
-func (s *SQLiteStorage) IsTimeAvailable(ctx context.Context, date, time string) (bool, error) {
+func (s *Storage) IsTimeAvailable(ctx context.Context, date, time string) (bool, error) {
 	var count int
-	err := s.db.QueryRowContext(ctx,
+	err := s.DB.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM bookings WHERE date = ? AND time = ?`,
 		date, time).Scan(&count)
 	return count == 0, err
 }
 
-func (s *SQLiteStorage) GetAllBookings(ctx context.Context) ([]*models.Booking, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *Storage) GetAllBookings(ctx context.Context) ([]*models.Booking, error) {
+	rows, err := s.DB.QueryContext(ctx, `
 		SELECT id, date, time, car_model, car_number 
 		FROM bookings ORDER BY date, time`)
 	if err != nil {
@@ -103,9 +103,9 @@ func (s *SQLiteStorage) GetAllBookings(ctx context.Context) ([]*models.Booking, 
 	}
 	return bookings, nil
 }
-func (s *SQLiteStorage) CancelBooking(ctx context.Context, bookingID string, userID int64) (*models.Booking, error) {
+func (s *Storage) CancelBooking(ctx context.Context, bookingID string, userID int64) (*models.Booking, error) {
 	// Начинаем транзакцию
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -144,8 +144,8 @@ func (s *SQLiteStorage) CancelBooking(ctx context.Context, bookingID string, use
 
 	return &booking, nil
 }
-func (s *SQLiteStorage) CreateOrUpdateUser(ctx context.Context, user *models.User) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *Storage) CreateOrUpdateUser(ctx context.Context, user *models.User) error {
+	_, err := s.DB.ExecContext(ctx, `
     INSERT INTO users (telegram_id, username, first_name, last_name)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(telegram_id) DO UPDATE SET

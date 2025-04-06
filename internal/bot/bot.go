@@ -14,16 +14,17 @@ type MessageHandler func(b *CarWashBot, update tgbotapi.Update, cfg *config.Conf
 
 type CarWashBot struct {
 	botAPI        *tgbotapi.BotAPI
-	storage       *storage.SQLiteStorage // Заменяем schedule на storage
+	storage       *storage.Storage // Заменяем schedule на storage
 	userStates    map[int64]models.UserState
 	adminID       int64
 	lastMessageID map[int64]int
 	msgIDLock     sync.Mutex
 	cfg           *config.Config // Добавляем конфиг в структуру бота
 	handlers      map[string]MessageHandler
+	store         *storage.Storage
 }
 
-func New(config *config.Config, storage *storage.SQLiteStorage) (*CarWashBot, error) {
+func New(config *config.Config, store *storage.Storage) (*CarWashBot, error) {
 	botAPI, err := tgbotapi.NewBotAPI(config.BotToken)
 	if err != nil {
 		return nil, err
@@ -38,7 +39,7 @@ func New(config *config.Config, storage *storage.SQLiteStorage) (*CarWashBot, er
 		lastMessageID: make(map[int64]int),
 		cfg:           config, // Сохраняем конфиг в структуре
 		handlers:      make(map[string]MessageHandler),
-		storage:       storage,
+		store:         store,
 	}, nil
 
 }

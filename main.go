@@ -1,41 +1,36 @@
 package main
 
 import (
-	"carwash-bot/internal/storage"
 	"log"
 	"os"
 
 	"carwash-bot/config"
 	"carwash-bot/internal/bot"
+	"carwash-bot/internal/storage"
 	"github.com/joho/godotenv"
+	_ "modernc.org/sqlite"
 )
 
 func main() {
-	// Загружаем конфигурацию
-	err := godotenv.Load()
-	if err != nil {
+	// Загружаем .env файл
+	if err := godotenv.Load(); err != nil {
 		log.Fatal("Error loading .env file")
 	}
 
-	// Получаем токен бота из переменных окружения
+	// Получаем переменные окружения
 	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	chatID := os.Getenv("TELEGRAM_CHAT_ID")
-
-	// Используем их в коде
 	log.Println("Bot Token:", botToken)
 	log.Println("Chat ID:", chatID)
+
+	// Загружаем конфигурацию
 	cfg := config.Load()
 
-	db, err := storage.NewSQLiteStorage("carwash.db")
-	if err != nil {
-		log.Fatal("Ошибка инициализации БД:", err)
-	}
-	defer db.Close()
+	// Инициализируем БД
+	db := storage.New()
+	defer db.DB.Close()
 
-	if err := db.Init(); err != nil {
-		log.Fatal("Ошибка создания таблиц:", err)
-	}
-	// Создаем бота
+	// Создаём и запускаем бота
 	carWashBot, err := bot.New(cfg, db)
 	if err != nil {
 		log.Fatalf("Ошибка создания бота: %v", err)
